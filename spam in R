@@ -1,0 +1,135 @@
+library(tidyverse)
+library(text2vec)
+library(caTools)
+library(glmnet)
+library(xgboost)
+library(pROC)
+
+# Load data
+emails_data <- read_csv(file.choose())
+
+# Add id column
+emails_data$id <- seq_len(nrow(emails_data))
+
+
+pie_data <- table(emails_data$label)
+percentages <- prop.table(pie_data) * 100
+labels <- paste(names(percentages), sprintf("%.1f%%", percentages), sep = "\n")
+
+# Define colors for "Not Spam" and "Spam"
+colors <- c("blue", "red")
+
+pie(pie_data, labels = labels, main = "Distribution of Spam and Not Spam", col = colors)
+legend("topright", legend = c("Not Spam (0)", "Spam (1)"), fill = colors)
+
+
+
+# Split data
+set.seed(123)
+split <- caTools::sample.split(emails_data$label, SplitRatio = 0.8)
+train_data <- subset(emails_data, split == TRUE)
+test_data <- subset(emails_data, split == FALSE)
+
+# Create vocabulary
+it_train <- train_data$email %>% 
+  itoken(preprocessor = tolower, 
+         tokenizer = word_tokenizer,
+         ids = train_data$id,
+         progressbar = FALSE)
+vocab <- create_vocabulary(it_train)
+
+# Train and evaluate glmnet classifier
+# Tokenization and vectorization for training data
+it_train <- train_data$email %>% 
+  itoken(preprocessor = tolower, 
+         tokenizer = word_tokenizer,
+         ids = train_data$id,
+         progressbar = FALSE)
+vectorizer <- create_dtm(it_train, vectorizer = vocab_vectorizer(vocab))
+
+# Train the glmnet classifier
+glmnet_classifier <- cv.glmnet(
+  x = as.matrix(vectorizer),
+  y = train_data$label,
+  family = 'binomial',
+  type.measure = "auc",
+  nfolds = 5,
+  thresh = 0.001,
+  maxit = 1000
+)
+
+# Tokenization and vectorization for test data
+it_test <- test_data$email %>% 
+  itoken(preprocessor = tolower, 
+         tokenizer = word_tokenizer,
+         ids = test_data$id,
+         progressbar = FALSE)
+dtm_test <- create_dtm(it_test, vectorizer = vocab_vectorizer(vocab))
+
+# Predictions for glmnet classifier
+preds_glmnet <- predict(glmnet_classifier, newx = as.matrix(dtm_test), type = 'response')[, 1]
+
+# Evaluate the glmnet classifier
+labels_predicted_glmnet <- ifelse(preds_glmnet > 0.5, 1, 0)
+confusion_matrix_glmnet <- table(test_data$label, labels_predicted_glmnet)
+
+# Calculate accuracy for glmnet classifier
+accuracy_glmnet <- sum(diag(confusion_matrix_glmnet)) / sum(confusion_matrix_glmnet)
+
+# Calculate RMSE for glmnet classifier
+rmse_glmnet <- sqrt(mean((preds_glmnet - test_data$label)^2))
+
+# Calculate precision and recall for glmnet classifier
+precision_glmnet <- confusion_matrix_glmnet[2, 2] / sum(confusion_matrix_glmnet[, 2])
+recall_glmnet <- confusion_matrix_glmnet[2, 2] / sum(confusion_matrix_glmnet[2, ])
+cat("Accuracy (glmnet):", accuracy_glmnet, "\n")
+cat("RMSE (glmnet):", rmse_glmnet, "\n")
+cat("Precision (glmnet):", precision_glmnet, "\n")
+cat("Recall (glmnet):", recall_glmnet, "\n")
+print(confusion_matrix_glmnet)
+
+# Train and evaluate Gradient Boosting classifier
+# Convert dtm to matrix
+matrix_train_xgboost <- as.matrix(vectorizer)
+
+# Train the Gradient Boosting classifier
+xgboost_classifier <- xgboost(
+  data = matrix_train_xgboost,
+  label = train_data$label,
+  nrounds = 100, 
+  # Add other parameters specific to xgboost::xgboost
+)
+
+# Convert dtm to matrix
+matrix_test_xgboost <- as.matrix(dtm_test)
+
+# Predictions for Gradient Boosting classifier
+preds_xgboost <- predict(xgboost_classifier, newdata = matrix_test_xgboost)
+
+# Evaluate the Gradient Boosting classifier
+labels_predicted_xgboost <- ifelse(preds_xgboost > 0.5, 1, 0)
+confusion_matrix_xgboost <- table(test_data$label, labels_predicted_xgboost)
+
+# Calculate accuracy for Gradient Boosting classifier
+accuracy_xgboost <- sum(diag(confusion_matrix_xgboost)) / sum(confusion_matrix_xgboost)
+
+# Calculate RMSE for Gradient Boosting classifier
+rmse_xgboost <- sqrt(mean((preds_xgboost - test_data$label)^2))
+
+# Calculate precision and recall for Gradient Boosting classifier
+precision_xgboost <- confusion_matrix_xgboost[2, 2] / sum(confusion_matrix_xgboost[, 2])
+recall_xgboost <- confusion_matrix_xgboost[2, 2] / sum(confusion_matrix_xgboost[2, ])
+cat("Accuracy (Gradient Boosting):", accuracy_xgboost, "\n")
+cat("RMSE (Gradient Boosting):", rmse_xgboost, "\n")
+cat("Precision (Gradient Boosting):", precision_xgboost, "\n")
+cat("Recall (Gradient Boosting):", recall_xgboost, "\n")
+print(confusion_matrix_xgboost)
+
+# ROC curve comparison
+roc_glmnet <- roc(test_data$label, preds_glmnet)
+roc_xgboost <- roc(test_data$label, preds_xgboost)
+
+# Plot ROC curves
+plot(roc_glmnet, col = "blue", main = "ROC Curve Comparison", lwd = 2)
+lines(roc_xgboost, col = "red", lwd = 2)
+legend("bottomright", legend = c("glmnet", "xgboost"), col = c("blue", "red"), lwd = 2)
